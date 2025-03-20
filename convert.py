@@ -13,6 +13,26 @@ import os
 import logging
 from argparse import ArgumentParser
 import shutil
+import struct
+import numpy as np
+
+def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
+    """Read and unpack the next bytes from a binary file.
+    :param fid:
+    :param num_bytes: Sum of combination of {2, 4, 8}, e.g. 2, 6, 16, 30, etc.
+    :param format_char_sequence: List of {c, e, f, d, h, H, i, I, l, L, q, Q}.
+    :param endian_character: Any of {@, =, <, >, !}
+    :return: Tuple of read and unpacked values.
+    """
+    data = fid.read(num_bytes)
+    return struct.unpack(endian_character + format_char_sequence, data)
+
+def read_num_images_binary(path_to_model_file):
+    num_reg_images = 0
+    with open(path_to_model_file, "rb") as fid:
+        num_reg_images = read_next_bytes(fid, 8, "Q")[0]
+        
+    return num_reg_images
 
 # This Python script is based on the shell converter script provided in the MipNerF 360 repository.
 parser = ArgumentParser("Colmap converter")
@@ -43,6 +63,8 @@ if not args.skip_matching:
         logging.error(f"Feature extraction failed with code {exit_code}. Exiting.")
         exit(exit_code)
 
+    print("Finished feature extraction... waiting")
+
     ## Feature matching
     feat_matching_cmd = colmap_command + " exhaustive_matcher \
         --database_path " + args.source_path + "/distorted/database.db \
@@ -51,6 +73,7 @@ if not args.skip_matching:
     if exit_code != 0:
         logging.error(f"Feature matching failed with code {exit_code}. Exiting.")
         exit(exit_code)
+    print("Finished feature matching... waiting")
 
     ### Bundle adjustment
     # The default Mapper tolerance is unnecessarily large,
@@ -60,10 +83,40 @@ if not args.skip_matching:
         --image_path "  + args.source_path + "/input \
         --output_path "  + args.source_path + "/distorted/sparse \
         --Mapper.ba_global_function_tolerance=0.000001")
+
     exit_code = os.system(mapper_cmd)
     if exit_code != 0:
         logging.error(f"Mapper failed with code {exit_code}. Exiting.")
         exit(exit_code)
+    print("Finished mapper... waiting")
+
+    # Find largest model
+    max_images = 0
+    max_model = ""
+    for dirpath, dirnames, filenames in os.walk(args.source_path + "/distorted/sparse"):
+        for file in filenames:
+            if file == "images.bin":
+                
+                txt_convert_cmd = (colmap_command + " model_converter \
+                    --input_path " + dirpath + " \
+                    --output_path " + dirpath + " \
+                    --output_type TXT")
+                os.system(txt_convert_cmd)
+
+                num_images = read_num_images_binary(os.path.join(dirpath, file))
+                if num_images > max_images:
+                    max_images = num_images
+                    max_model = dirpath
+
+    print(f"Found largest model in {max_model} with {max_images} images.")
+    print(os.path.normpath(max_model))
+    print(os.path.normpath(args.source_path + "/distorted/sparse/0/"))
+    # Rename largest model to 0
+    if os.path.normpath(max_model) != os.path.normpath(args.source_path + "/distorted/sparse/0/"):
+        # shutil.rmtree(args.source_path + "/distorted/sparse/temp0", ignore_errors=True)
+        os.rename(args.source_path + "/distorted/sparse/0", args.source_path + "/distorted/sparse/temp0")
+        os.rename(max_model, args.source_path + "/distorted/sparse/0")
+        print("Rearranging models")
 
 ### Image undistortion
 ## We need to undistort our images into ideal pinhole intrinsics.
@@ -76,6 +129,7 @@ exit_code = os.system(img_undist_cmd)
 if exit_code != 0:
     logging.error(f"Mapper failed with code {exit_code}. Exiting.")
     exit(exit_code)
+print("Finished undistortion... waiting")
 
 files = os.listdir(args.source_path + "/sparse")
 os.makedirs(args.source_path + "/sparse/0", exist_ok=True)
@@ -86,6 +140,16 @@ for file in files:
     source_file = os.path.join(args.source_path, "sparse", file)
     destination_file = os.path.join(args.source_path, "sparse", "0", file)
     shutil.move(source_file, destination_file)
+
+# Convert to txt
+convert_cmd = (colmap_command + " model_converter \
+    --input_path " + args.source_path + "/sparse/0 \
+    --output_path " + args.source_path + "/sparse \
+    --output_type TXT")
+exit_code = os.system(convert_cmd)
+if exit_code != 0:
+    logging.error(f"Model conversion failed with code {exit_code}. Exiting.")
+    exit(exit_code)
 
 if(args.resize):
     print("Copying and resizing...")
